@@ -1,0 +1,336 @@
+#!/bin/bash
+###
+### CountMappedReads2: a tool for NGS read mapping, count reads and calculate normalized abundance
+###
+### Copyright: 2018 (C) Yosuke Nishimura (ynishimura@aori.u-tokyo.ac.jp)
+### Licence: MIT license
+###
+
+PROGNAME=$(basename $0)
+VERSION="2.0.0"
+Errmsg="[1;31m[error][0m"
+Sccmsg="[1;32m[success][0m"
+Modidate="2018-04-25"
+incmd="$0 $*"
+
+
+# {{{ usage
+read -r -d '' usage <<EOF
+[1;35m### $PROGNAME ver $VERSION ($Modidate) ###[0m
+
+[1;32m[description][0m
+$PROGNAME - a tool for NGS read mapping, count reads and calculate normalized abundance
+$PROGNAME serializes multiple processes including NGS read maping (by bowtie2), conversion to bam (by samtools), count mapped reads (by featureCounts),
+and coverage/FPKM(RPKM)/TPM calculation (by in-house script).
+
+[1;32m[usage][0m
+$ $PROGNAME <reference fasta> <output dir> {-1 <pe1> -2 <pe2> | -U <up>} [options]
+
+[1;32m[arguments][0m
+    - reference fasta      -- nucleotide fasta file for read mapping on (e.g. genomes, contigs)
+    - output dir           -- output directory (should not exist).
+
+[1;32m[dependencies][0m
+    - bowtie2
+    - samtools
+    - subread (for featureCounts)
+    - ruby (ver >=2.0) 
+
+[1;32m[options][0m
+  (general)
+    -h, --help
+    -v, --version
+    --gene      [str] gene annotation file -- either of GTF (GTF2), GFF3, or BED (BED6) formatted file.
+    --format    [str] to specify format of gene annotation file, either of 'GTF', 'GTF2', 'GFF3', 'BED', or 'BED6'. If not given, format is inferred from extention of gene annotation file.
+
+  (bowtie2)
+    -1          [str] (required)      -- bowtie2 '-1' option (for paired-end read 1)
+    -2          [str] (required)      -- bowtie2 '-2' option (for paired-end read 2)
+    -U          [str] (required)      -- bowtie2 '-U' option (for unpaired reads)
+    --score-min [str]                 -- bowtie2 '--score-min' option under '--end-to-end' mapping (default: 'L,0,-0.6')
+
+  (featureCounts)
+    --feature   [str] (default: gene)         -- specify feature name for count (some type written in 3rd column in GTF/GFF format). If '--format' is BED(6), all lines are included for count, regardless of '--feature'.
+    --attr      [str] (default: <feature>_id) -- speficy attribute to count by (written in 9th column in GTF/GFF format). If '--format' is BED(6), 4th column is used to count by, regardless of '--attr'.
+
+  (computation)
+    --threads   [int] (default: 1)    -- number of threads for run of bowtie2, samtools, and featureCounts
+    --mem       [str] (default: 1G)   -- maximum memory per thread for 'samtools sort'; suffix K/M/G is recognized (e.g., 800M)
+
+[1;32m[output files][0m
+count/sequence.result.tsv                                -- tab separated file reporting  sequence abundance (BED6 and 7: count, 8: coverage, 9: FPKM(RPKM), 10: TPM)
+count/<feature>.result.tsv (only when '--gene' is given) -- tab separated file reporting <feature> abundance (BED6 and 7: count, 8: coverage, 9: FPKM(RPKM), 10: TPM)
+
+[1;32m[note][0m
+$PROGNAME does not perform quality control of reads. It is recommended to do QC and use QCed read as input.
+If '--gene' option is given, $PROGNAME returns count and normalized abundance both for input sequences (e.g., genomes, contigs) and for elements (e.g., genes)
+In this tool, FPKM(RPKM) and TPM are defined as described in http://www.rna-seqblog.com/rpkm-fpkm-and-tpm-clearly-explained/
+
+The '--score-min' option of bowtie2 controls a minimum acceptable level of mapping quality.
+For example, with the 'end-to-end' mode, '--score-min L,0,-0.6' means an aligned region shows at least 90% identity, assuming that a read quality is high enough and a gap is not open.
+Similarity, 'L,0,-0.3' means at least 95% identity, 'L,0,-0.9' means at least 85% identity, and 'L,0,-1.2' means at least 80% identity under the same assumption.
+For deteils of the '--score-min' option and the alignment score, see bowtie2 manual page (http://bowtie-bio.sourceforge.net/bowtie2/manual.shtml).
+EOF
+# }}} usage
+
+
+# {{{ parse command line
+for OPT in "$@"
+do
+	case "$OPT" in
+		'-h'|'--help' )
+			echo "$usage"
+			exit 1
+			;;
+		'-v'|'--version' )
+			echo $VERSION
+			exit 1
+			;;
+		'-1' )
+			if [[ -z "$2" ]] || [[ "$2" =~ ^-+ ]] ; then
+				echo "$Errmsg option requires an argument -- $1" 1>&2
+				exit 1
+			fi
+			pe1="$2"
+			shift 2
+			;;
+		'-2' )
+			if [[ -z "$2" ]] || [[ "$2" =~ ^-+ ]] ; then
+				echo "$Errmsg option requires an argument -- $1" 1>&2
+				exit 1
+			fi
+			pe2="$2"
+			shift 2
+			;;
+		'-U' )
+			if [[ -z "$2" ]] || [[ "$2" =~ ^-+ ]] ; then
+				echo "$Errmsg option requires an argument -- $1" 1>&2
+				exit 1
+			fi
+			up="$2"
+			shift 2
+			;;
+		'--gene' )
+			if [[ -z "$2" ]] || [[ "$2" =~ ^-+ ]] ; then
+				echo "$Errmsg option requires an argument -- $1" 1>&2
+				exit 1
+			fi
+			gene="$2"
+			shift 2
+			;;
+		'--format' )
+			if [[ -z "$2" ]] || [[ "$2" =~ ^-+ ]] ; then
+				echo "$Errmsg option requires an argument -- $1" 1>&2
+				exit 1
+			fi
+			if [[ "$2" != "GTF" ]] && [[ "$2" != "GTF2" ]] && [[ "$2" != "GFF3" ]] && [[ "$2" != "BED" ]] && [[ "$2" != "BED6" ]] ; then
+				echo "$Errmsg either of 'GTF', 'GTF2', 'GFF3', 'BED', or 'BED6' can be selected  -- $1" 1>&2
+				exit 1
+			else
+				format="$2"
+				shift 2
+			fi
+			;;
+		'--feature' )
+			if [[ -z "$2" ]] || [[ "$2" =~ ^-+ ]] ; then
+				echo "$Errmsg option requires an argument -- $1" 1>&2
+				exit 1
+			fi
+			if [[ "$2" = "sequence" ]] ; then
+				echo "$Errmsg '$1 sequence' is not allowed" 1>&2
+				exit 1
+			else
+				feature="$2"
+				shift 1
+			fi
+			;;
+		'--attr' )
+			if [[ -z "$2" ]] || [[ "$2" =~ ^-+ ]] ; then
+				echo "$Errmsg option requires an argument -- $1" 1>&2
+				exit 1
+			fi
+			attr="$2"
+			shift 1
+			;;
+		'--score-min' )
+			if [[ -z "$2" ]] || [[ "$2" =~ ^-+ ]] ; then
+				echo "$Errmsg option requires an argument -- $1" 1>&2
+				exit 1
+			fi
+			score_min="$2"
+			shift 2
+			;;
+		'--threads' )
+			if [[ -z "$2" ]] || [[ "$2" =~ ^-+ ]] ; then
+				echo "$Errmsg option requires an argument -- $1" 1>&2
+				exit 1
+			fi
+			threads="$2"
+			shift 2
+			;;
+		'--mem' )
+			if [[ -z "$2" ]] || [[ "$2" =~ ^-+ ]] ; then
+				echo "$Errmsg option requires an argument -- $1" 1>&2
+				exit 1
+			fi
+			mem="$2"
+			shift 2
+			;;
+		'--'|'-' )
+			shift 1
+			params+=( "$@" )
+			break
+			;;
+		-*)
+			echo "$Errmsg illegal option -- '$(echo $1 | sed 's/^-*//')'" 1>&2
+			exit 1
+			;;
+		*)
+			if [[ ! -z "$1" ]] && [[ ! "$1" =~ ^-+ ]] ; then
+				#params=( ${params[@]} "$1" )
+				params+=( "$1" )
+				shift 1
+			fi
+			;;
+	esac
+done
+if [[ -z $params ]] || [[ ${#params[@]} -lt 2 ]] ; then
+	echo "$Errmsg need 2 arguments" 1>&2
+	echo 
+	echo "$usage" 1>&2
+	exit 1
+elif ! [[ -f "${params[0]}" ]] ; then
+	echo "$Errmsg the first argument should be a fasta file." 1>&2
+	echo 
+	echo "$usage" 1>&2
+	exit 1
+elif [[ -e "${params[1]}" ]] ; then
+	echo "$Errmsg output directory is already exist." 1>&2
+	echo 
+	echo "$usage" 1>&2
+	exit 1
+fi
+if [[ -z $pe1 ]] && [[ -z $se ]] ; then
+	echo "$Errmsg specify read file(s) by ('-1 <pe1> -2 <pe2>' and/or '-U <up>')" 1>&2
+	echo 
+	echo "$usage" 1>&2
+	exit 1
+fi
+if [[ -n $pe1 ]] && [[ -z $pe2 ]] ; then
+	echo "$Errmsg specify two files of paired-end reads by '-1 <pe1> -2 <pe2>'" 1>&2
+	echo 
+	echo "$usage" 1>&2
+	exit 1
+fi
+if [[ -z $pe1 ]] && [[ -n $pe2 ]] ; then
+	echo "$Errmsg specify two files of paired-end reads by '-1 <pe1> -2 <pe2>'" 1>&2
+	echo 
+	echo "$usage" 1>&2
+	exit 1
+fi
+if ! [[ -n "$gene" ]] && [[ -f "$gene" ]] ; then
+	echo "$Errmsg specify a gene annotation file by '--gene <gene annotaion file>'." 1>&2
+	echo 
+	echo "$usage" 1>&2
+	exit 1
+fi
+# }}} parse command line
+
+
+# {{{ check dependencies
+### check availablity of tblastx
+command -v bowtie2 >/dev/null 2>&1 || { echo >&2 "$Errmsg bowtie2 is required but not available.  Aborting."; exit 1; }
+command -v bowtie2-build >/dev/null 2>&1 || { echo >&2 "$Errmsg bowtie2-build is required but not available.  Aborting."; exit 1; }
+command -v samtools >/dev/null 2>&1 || { echo >&2 "$Errmsg samtools is required but not available.  Aborting."; exit 1; }
+command -v featureCounts >/dev/null 2>&1 || { echo >&2 "$Errmsg featureCounts is required but not available.  Aborting."; exit 1; }
+
+### check ruby version
+ST=`ruby -e 'print RUBY_VERSION.to_f >= 2.0 ? 0 : 1'`
+if [ $ST -ne 0 ]; then 
+	echo >&2 "$Errmsg ruby (version >=2.0) is required.  Aborting."; exit 1;
+fi
+
+### check availablity of GNU parallel
+if [ -n $ncpus ]; then 
+	command -v parallel >/dev/null 2>&1 || { echo >&2 "$Errmsg GNU parallel is required but not available.  Aborting."; exit 1; }
+fi
+# }}} check dependencies
+
+
+# {{{ assign variables 
+### parse args
+fin="${params[0]}"
+dir="${params[1]}"
+
+### featureCounts
+feature="${feature:-gene}"
+format="${format}"
+attr="${attr:-${feature}_id}"
+
+### bowtie2 params
+pe1="${pe1}"
+pe2="${pe2}"
+up="${up}"
+gene="${gene}"
+score_min="${score_min:-L,0,-0.6}"
+
+### computation params
+threads="${threads:-1}"
+mem="${mem:-1G}"
+
+### rakefile/logdir
+pushd `dirname $0` > /dev/null
+scrdir=`pwd -P`
+popd > /dev/null
+jobname=`basename $0`
+rakefile=$scrdir/$jobname.rake
+logdir=$dir/log
+# }}} assign variables 
+
+
+# {{{ after run function
+function after_run(){
+  endTime=$(LC_ALL=C date +"%Y-%m-%d %H:%M:%S %z")
+
+  if [[ $1 -gt 0 ]] ; then
+    echo "$Errmsg run failed: $endTime" > "$logdir/$startTime.$jobname.error"
+    echo "$Errmsg process is killed: $endTime" |tee -a "$logdir/$jobname.log"
+    exit 1
+  else
+    echo "$Sccmsg run finished: $endTime" > "$logdir/$startTime.$jobname.success"
+  fi
+}
+### }}} after run function
+
+
+# {{{ input command
+read -r -d '' incmdlog <<EOF
+
+[1;32m===== command line[0m
+
+$ $incmd
+
+[1;32m===== log file[0m
+
+$logdir/$jobname.log
+
+EOF
+# }}} input command
+
+
+### main
+mkdir -p $logdir
+startTime=$(LC_ALL=C date +"%Y-%m-%d %H:%M:%S")
+
+## write input command
+echo "$incmdlog" |tee -a $logdir/$jobname.log
+
+## trap Ctrl-C etc...
+trap 'after_run 1' 1 2 3 9 15
+
+## run
+rake -f $rakefile fin="$fin" dir="$dir" gene="$gene" feature="$feature" format="$format" attr="$attr" pe1="$pe1" pe2="$pe2" up="$up" score_min="$score_min" threads="$threads" mem="$mem" \
+	2>&1 |tee -a $logdir/$jobname.log
+st=$(( ${PIPESTATUS[0]} + ${PIPESTATUS[1]} ))
+after_run $st
+

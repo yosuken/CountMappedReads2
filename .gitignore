@@ -1,0 +1,15 @@
+
+### bundle related files
+/vendor/*
+/.bundle/*
+# Gemfile.lock
+
+### directories/files for test
+/test/
+/testdata/
+run_test.sh
+
+### file cache
+*.swp
+*~
+.nfs*
