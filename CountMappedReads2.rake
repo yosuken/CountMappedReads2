@@ -95,9 +95,11 @@ task :default do
 	Attr     = ENV["attr"] 
 	if Gene == "" ## when gene annotaion is not given
 		Types    = ["sequence"]
-		Format = ""
+		Attrs    = ["sequence_id"]
+		Format   = ""
 	else
 		Types    = [Feature, "sequence"]
+		Attrs    = [Attr,    "sequence_id"]
 		if ENV["format"].size > 0
 			Format = ENV["format"]
 		else
@@ -275,7 +277,7 @@ task "02-1.featureCounts", ["step"] do |t, args|
 	PrintStatus.call(args.step, NumStep, "START", t)
 	mkdir_p Cdir
 
-	Types.zip([Attr, "sequence_id"]){ |type, attr|
+	Types.zip(Attrs){ |type, attr|
 		anot = case Format 
 					 when /^GFF3/ then "#{Adir}/#{type}.gff3"
 					 else "#{Adir}/#{type}.gtf"
