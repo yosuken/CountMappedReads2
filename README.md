@@ -15,7 +15,7 @@ Countmappedreads2 serializes multiple processes including NGS read maping (by bo
 
 ## usage 
 ```
-### CountMappedReads2 ver 2.0.0 (2018-04-25) ###
+### CountMappedReads2 ver 2.0.0 (2018-05-02) ###
 
 [description]
 CountMappedReads2 - a tool for NGS read mapping, count reads and calculate normalized abundance

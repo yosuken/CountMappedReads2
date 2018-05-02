@@ -10,7 +10,7 @@ PROGNAME=$(basename $0)
 VERSION="2.0.0"
 Errmsg="[1;31m[error][0m"
 Sccmsg="[1;32m[success][0m"
-Modidate="2018-04-25"
+Modidate="2018-05-02"
 incmd="$0 $*"
 
 
@@ -210,7 +210,7 @@ elif [[ -e "${params[1]}" ]] ; then
 	echo "$usage" 1>&2
 	exit 1
 fi
-if [[ -z $pe1 ]] && [[ -z $se ]] ; then
+if [[ -z $pe1 ]] && [[ -z $up ]] ; then
 	echo "$Errmsg specify read file(s) by ('-1 <pe1> -2 <pe2>' and/or '-U <up>')" 1>&2
 	echo 
 	echo "$usage" 1>&2
